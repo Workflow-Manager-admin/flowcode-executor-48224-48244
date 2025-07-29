@@ -1,6 +1,5 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 import subprocess
@@ -8,7 +7,6 @@ import uuid
 
 ### --- OpenAPI/Swagger tags ---
 openapi_tags = [
-    {"name": "auth", "description": "Authentication (login/register)"},
     {"name": "flows", "description": "Flow CRUD operations"},
     {"name": "execution", "description": "JavaScript code execution"},
     {"name": "results", "description": "Execution result management"},
@@ -16,7 +14,7 @@ openapi_tags = [
 
 app = FastAPI(
     title="Flow Diagram-Based JavaScript Code Executor Backend",
-    description="Backend for Visual Flow Diagram JS Executor. Allows JS code execution, flow CRUD, result management, and authentication.",
+    description="Backend for Visual Flow Diagram JS Executor. Allows JS code execution, flow CRUD, and result management.",
     version="0.1.0",
     openapi_tags=openapi_tags,
 )
@@ -32,18 +30,6 @@ app.add_middleware(
 #########################################
 # --- Pydantic Models ---
 #########################################
-class UserRegisterRequest(BaseModel):
-    username: str = Field(..., description="Username")
-    password: str = Field(..., description="Password")
-
-class UserLoginRequest(BaseModel):
-    username: str = Field(..., description="Username")
-    password: str = Field(..., description="Password")
-
-class TokenResponse(BaseModel):
-    access_token: str = Field(..., description="Bearer token")
-    token_type: str = Field(default="bearer", description="Type of token (bearer)")
-    
 class FlowNode(BaseModel):
     id: str
     type: str
@@ -88,7 +74,7 @@ class RunCodeResult(BaseModel):
 class ExecutionResultHistory(BaseModel):
     id: str
     flow_id: str
-    user: str
+    user: Optional[str] = None
     timestamp: str
     result: RunCodeResult
 
@@ -96,26 +82,8 @@ class ExecutionResultHistory(BaseModel):
 # --- In-Memory Placeholders ---
 #########################################
 # Replace with actual DB integration
-USERS = {}
-TOKENS = {}
 FLOWS = {}
 RESULTS = {}
-
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
-
-def fake_decode_token(token: str):
-    # Very simple stub: maps tokens directly to usernames
-    return TOKENS.get(token)
-
-# PUBLIC_INTERFACE
-def get_current_user(token: str = Depends(oauth2_scheme)):
-    """
-    Dependency to get the current authenticated user.
-    """
-    user = fake_decode_token(token)
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid authentication credentials")
-    return user
 
 #########################################
 # --- Basic Health Check ---
@@ -127,62 +95,28 @@ def health_check():
     return {"status": "Healthy"}
 
 #########################################
-# --- Authentication Endpoints ---
-#########################################
-
-# PUBLIC_INTERFACE
-@app.post("/auth/register", response_model=TokenResponse, summary="Register new user", tags=["auth"])
-def register_user(request: UserRegisterRequest):
-    """
-    Register a new user. Stores credentials in-memory (for demo).
-    Returns a bearer token for authentication.
-    """
-    if request.username in USERS:
-        raise HTTPException(status_code=400, detail="Username already exists.")
-    USERS[request.username] = request.password
-    token = str(uuid.uuid4())
-    TOKENS[token] = request.username
-    return TokenResponse(access_token=token, token_type="bearer")
-
-# PUBLIC_INTERFACE
-@app.post("/auth/login", response_model=TokenResponse, summary="Login", tags=["auth"])
-def login_user(form_data: OAuth2PasswordRequestForm = Depends()):
-    """
-    User login endpoint. Accepts username & password (form encoded).
-    Returns a bearer token for authentication.
-    """
-    username = form_data.username
-    password = form_data.password
-    if username not in USERS or USERS[username] != password:
-        raise HTTPException(status_code=401, detail="Incorrect username or password")
-    # Issue new token
-    token = str(uuid.uuid4())
-    TOKENS[token] = username
-    return TokenResponse(access_token=token, token_type="bearer")
-
-#########################################
 # --- Flow CRUD Endpoints ---
 #########################################
 
 # PUBLIC_INTERFACE
 @app.get("/flows", response_model=List[FlowDiagram], summary="List all flows", tags=["flows"])
-def list_flows(current_user: str = Depends(get_current_user)):
+def list_flows():
     """
-    List all flows for the current authenticated user.
+    List all flows.
     """
-    return [flow for flow in FLOWS.values() if flow.owner == current_user]
+    return list(FLOWS.values())
 
 # PUBLIC_INTERFACE
 @app.post("/flows", response_model=FlowDiagram, summary="Create a new flow", tags=["flows"])
-def create_flow(request: CreateFlowRequest, current_user: str = Depends(get_current_user)):
+def create_flow(request: CreateFlowRequest):
     """
-    Create a new flow for the authenticated user.
+    Create a new flow.
     """
     flow_id = str(uuid.uuid4())
     new_flow = FlowDiagram(
         id=flow_id,
         title=request.title,
-        owner=current_user,
+        owner=None,
         nodes=request.nodes,
         edges=request.edges,
         created_at="",  # placeholder
@@ -193,23 +127,23 @@ def create_flow(request: CreateFlowRequest, current_user: str = Depends(get_curr
 
 # PUBLIC_INTERFACE
 @app.get("/flows/{flow_id}", response_model=FlowDiagram, summary="Get a specific flow", tags=["flows"])
-def get_flow(flow_id: str, current_user: str = Depends(get_current_user)):
+def get_flow(flow_id: str):
     """
     Get a specific flow diagram by ID.
     """
     flow = FLOWS.get(flow_id)
-    if not flow or flow.owner != current_user:
+    if not flow:
         raise HTTPException(status_code=404, detail="Flow not found")
     return flow
 
 # PUBLIC_INTERFACE
 @app.put("/flows/{flow_id}", response_model=FlowDiagram, summary="Update a flow", tags=["flows"])
-def update_flow(flow_id: str, request: UpdateFlowRequest, current_user: str = Depends(get_current_user)):
+def update_flow(flow_id: str, request: UpdateFlowRequest):
     """
     Update a flow (title, structure).
     """
     flow = FLOWS.get(flow_id)
-    if not flow or flow.owner != current_user:
+    if not flow:
         raise HTTPException(status_code=404, detail="Flow not found")
     if request.title is not None:
         flow.title = request.title
@@ -222,12 +156,12 @@ def update_flow(flow_id: str, request: UpdateFlowRequest, current_user: str = De
 
 # PUBLIC_INTERFACE
 @app.delete("/flows/{flow_id}", summary="Delete a flow", tags=["flows"])
-def delete_flow(flow_id: str, current_user: str = Depends(get_current_user)):
+def delete_flow(flow_id: str):
     """
     Delete a flow by ID.
     """
     flow = FLOWS.get(flow_id)
-    if not flow or flow.owner != current_user:
+    if not flow:
         raise HTTPException(status_code=404, detail="Flow not found")
     del FLOWS[flow_id]
     return {"message": "Flow deleted"}
@@ -238,14 +172,14 @@ def delete_flow(flow_id: str, current_user: str = Depends(get_current_user)):
 
 # PUBLIC_INTERFACE
 @app.post("/execute", response_model=RunCodeResult, summary="Execute JavaScript for a flow", tags=["execution"])
-def execute_js_flow(request: RunCodeRequest, current_user: str = Depends(get_current_user)):
+def execute_js_flow(request: RunCodeRequest):
     """
     Executes the JavaScript code associated with the flow.
     Uses a subprocess call to Node.js for sandboxed execution.
     NOTE: Real implementation MUST sandbox/validate code securely!
     """
     flow = FLOWS.get(request.flow_id)
-    if not flow or flow.owner != current_user:
+    if not flow:
         raise HTTPException(status_code=404, detail="Flow not found")
     # For now, let's assume that the "nodes" contain a code block under "data" key.
     # We'll concatenate any code blocks for demo.
@@ -285,7 +219,7 @@ def execute_js_flow(request: RunCodeRequest, current_user: str = Depends(get_cur
     )
     RESULTS[execution_id] = {
         "result": run_result,
-        "user": current_user,
+        "user": None,
         "flow_id": request.flow_id,
         "timestamp": "",  # set timestamp here
     }
@@ -297,39 +231,37 @@ def execute_js_flow(request: RunCodeRequest, current_user: str = Depends(get_cur
 
 # PUBLIC_INTERFACE
 @app.get("/results", response_model=List[ExecutionResultHistory], summary="Get all execution results", tags=["results"])
-def get_all_results(current_user: str = Depends(get_current_user)):
+def get_all_results():
     """
-    Get all execution results for the current user.
+    Get all execution results.
     """
     return [
         ExecutionResultHistory(
             id=k,
             flow_id=v["flow_id"],
-            user=v["user"],
+            user=None,
             timestamp=v.get("timestamp", ""),
             result=v["result"]
         )
         for k, v in RESULTS.items()
-        if v["user"] == current_user
     ]
 
 # PUBLIC_INTERFACE
 @app.get("/results/{execution_id}", response_model=ExecutionResultHistory, summary="Get result by execution ID", tags=["results"])
-def get_result(execution_id: str, current_user: str = Depends(get_current_user)):
+def get_result(execution_id: str):
     """
     Get a specific execution result by result ID.
     """
     result_data = RESULTS.get(execution_id)
-    if not result_data or result_data["user"] != current_user:
+    if not result_data:
         raise HTTPException(status_code=404, detail="Result not found")
     return ExecutionResultHistory(
         id=execution_id,
         flow_id=result_data["flow_id"],
-        user=result_data["user"],
+        user=None,
         timestamp=result_data.get("timestamp", ""),
         result=result_data["result"]
     )
-
 
 #########################################
 # --- Swagger/WebSocket Usage Help ---
@@ -343,4 +275,3 @@ def ws_usage_help():
     return {
         "info": "This backend exposes HTTP REST endpoints for all operations. Real-time WebSocket communication is not implemented in this version."
     }
-
